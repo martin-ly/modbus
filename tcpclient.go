@@ -5,6 +5,7 @@
 package modbus
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -56,12 +57,13 @@ type tcpPackager struct {
 }
 
 // Encode adds modbus application protocol header:
-//  Transaction identifier: 2 bytes
-//  Protocol identifier: 2 bytes
-//  Length: 2 bytes
-//  Unit identifier: 1 byte
-//  Function code: 1 byte
-//  Data: n bytes
+//
+//	Transaction identifier: 2 bytes
+//	Protocol identifier: 2 bytes
+//	Length: 2 bytes
+//	Unit identifier: 1 byte
+//	Function code: 1 byte
+//	Data: n bytes
 func (mb *tcpPackager) Encode(pdu *ProtocolDataUnit) (adu []byte, err error) {
 	adu = make([]byte, tcpHeaderSize+1+len(pdu.Data))
 
@@ -107,10 +109,11 @@ func (mb *tcpPackager) Verify(aduRequest []byte, aduResponse []byte) (err error)
 }
 
 // Decode extracts PDU from TCP frame:
-//  Transaction identifier: 2 bytes
-//  Protocol identifier: 2 bytes
-//  Length: 2 bytes
-//  Unit identifier: 1 byte
+//
+//	Transaction identifier: 2 bytes
+//	Protocol identifier: 2 bytes
+//	Length: 2 bytes
+//	Unit identifier: 1 byte
 func (mb *tcpPackager) Decode(adu []byte) (pdu *ProtocolDataUnit, err error) {
 	// Read length value in the header
 	length := binary.BigEndian.Uint16(adu[4:])
@@ -136,6 +139,9 @@ type tcpTransporter struct {
 	IdleTimeout time.Duration
 	// Transmission logger
 	Logger *log.Logger
+	// Context mutex
+	cmu sync.Mutex
+	ctx context.Context
 
 	// TCP connection
 	mu           sync.Mutex
@@ -205,10 +211,21 @@ func (mb *tcpTransporter) Connect() error {
 	return mb.connect()
 }
 
+func (mb *tcpTransporter) WithCtx(ctx context.Context) {
+	mb.cmu.Lock()
+	defer mb.cmu.Unlock()
+	mb.ctx = ctx
+}
+
 func (mb *tcpTransporter) connect() error {
 	if mb.conn == nil {
 		dialer := net.Dialer{Timeout: mb.Timeout}
-		conn, err := dialer.Dial("tcp", mb.Address)
+		//conn, err := dialer.Dial("tcp", mb.Address)
+		mb.cmu.Lock()
+		ctx0 := mb.ctx
+		mb.cmu.Unlock()
+		conn, err := dialer.DialContext(ctx0, "tcp", mb.Address)
+
 		if err != nil {
 			return err
 		}
@@ -239,7 +256,7 @@ func (mb *tcpTransporter) Close() error {
 // flush flushes pending data in the connection,
 // returns io.EOF if connection is closed.
 func (mb *tcpTransporter) flush(b []byte) (err error) {
-	if err = mb.conn.SetReadDeadline(time.Now()); err != nil {
+	if err = mb.conn.SetReadDeadline(time.Now().Add(mb.Timeout)); err != nil {
 		return
 	}
 	// Timeout setting will be reset when reading
@@ -275,7 +292,8 @@ func (mb *tcpTransporter) closeIdle() {
 	if mb.IdleTimeout <= 0 {
 		return
 	}
-	idle := time.Now().Sub(mb.lastActivity)
+	//idle := time.Now().Sub(mb.lastActivity)
+	idle := time.Since(mb.lastActivity)
 	if idle >= mb.IdleTimeout {
 		mb.logf("modbus: closing connection due to idle timeout: %v", idle)
 		mb.close()
